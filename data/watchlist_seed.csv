@@ -1,0 +1,26 @@
+Code,Name,Market,Symbol,NewsKeyword,XSearchURL
+7203,トヨタ自動車,東証,TYO:7203,トヨタ自動車,https://x.com/search?q=%24%37%32%30%33%20OR%20%E3%83%88%E3%83%A8%E3%82%BF%E8%87%AA%E5%8B%95%E8%BB%8A&f=live
+6758,ソニーグループ,東証,TYO:6758,ソニーグループ,https://x.com/search?q=%24%36%37%35%38%20OR%20%E3%82%BD%E3%83%8B%E3%83%BC%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97&f=live
+9984,ソフトバンクグループ,東証,TYO:9984,ソフトバンクグループ,https://x.com/search?q=%24%39%39%38%34%20OR%20%E3%82%BD%E3%83%95%E3%83%88%E3%83%90%E3%83%B3%E3%82%AF%E3%82%B0%E3%83%AB%E3%83%BC%E3%83%97&f=live
+8035,東京エレクトロン,東証,TYO:8035,東京エレクトロン,https://x.com/search?q=%24%38%30%33%35%20OR%20%E6%9D%B1%E4%BA%AC%E3%82%A8%E3%83%AC%E3%82%AF%E3%83%88%E3%83%AD%E3%83%B3&f=live
+6861,キーエンス,東証,TYO:6861,キーエンス,https://x.com/search?q=%24%36%38%36%31%20OR%20%E3%82%AD%E3%83%BC%E3%82%A8%E3%83%B3%E3%82%B9&f=live
+9983,ファーストリテイリング,東証,TYO:9983,ファーストリテイリング,https://x.com/search?q=%24%39%39%38%33%20OR%20%E3%83%95%E3%82%A1%E3%83%BC%E3%82%B9%E3%83%88%E3%83%AA%E3%83%86%E3%82%A4%E3%83%AA%E3%83%B3%E3%82%B0&f=live
+6098,リクルートHD,東証,TYO:6098,リクルートホールディングス,https://x.com/search?q=%24%36%30%39%38%20OR%20%E3%83%AA%E3%82%AF%E3%83%AB%E3%83%BC%E3%83%88&f=live
+8306,三菱UFJ FG,東証,TYO:8306,三菱UFJフィナンシャル,https://x.com/search?q=%24%38%33%30%36%20OR%20%E4%B8%89%E8%8F%B1UFJ&f=live
+6501,日立製作所,東証,TYO:6501,日立製作所,https://x.com/search?q=%24%36%35%30%31%20OR%20%E6%97%A5%E7%AB%8B%E8%A3%BD%E4%BD%9C%E6%89%80&f=live
+7974,任天堂,東証,TYO:7974,任天堂,https://x.com/search?q=%24%37%39%37%34%20OR%20%E4%BB%BB%E5%A4%A9%E5%A0%82&f=live
+6902,デンソー,東証,TYO:6902,デンソー,https://x.com/search?q=%24%36%39%30%32%20OR%20%E3%83%87%E3%83%B3%E3%82%BD%E3%83%BC&f=live
+4063,信越化学工業,東証,TYO:4063,信越化学工業,https://x.com/search?q=%24%34%30%36%33%20OR%20%E4%BF%A1%E8%B6%8A%E5%8C%96%E5%AD%A6&f=live
+8058,三菱商事,東証,TYO:8058,三菱商事,https://x.com/search?q=%24%38%30%35%38%20OR%20%E4%B8%89%E8%8F%B1%E5%95%86%E4%BA%8B&f=live
+9432,日本電信電話NTT,東証,TYO:9432,NTT 日本電信電話,https://x.com/search?q=%24%39%34%33%32%20OR%20NTT&f=live
+6857,アドバンテスト,東証,TYO:6857,アドバンテスト,https://x.com/search?q=%24%36%38%35%37%20OR%20%E3%82%A2%E3%83%89%E3%83%90%E3%83%B3%E3%83%86%E3%82%B9%E3%83%88&f=live
+4519,中外製薬,東証,TYO:4519,中外製薬,https://x.com/search?q=%24%34%35%31%39%20OR%20%E4%B8%AD%E5%A4%96%E8%A3%BD%E8%96%AC&f=live
+7011,三菱重工業,東証,TYO:7011,三菱重工業,https://x.com/search?q=%24%37%30%31%31%20OR%20%E4%B8%89%E8%8F%B1%E9%87%8D%E5%B7%A5&f=live
+8001,伊藤忠商事,東証,TYO:8001,伊藤忠商事,https://x.com/search?q=%24%38%30%30%31%20OR%20%E4%BC%8A%E8%97%A4%E5%BF%A0%E5%95%86%E4%BA%8B&f=live
+AAPL,Apple,NASDAQ,NASDAQ:AAPL,Apple Inc,https://x.com/search?q=%24AAPL&f=live
+MSFT,Microsoft,NASDAQ,NASDAQ:MSFT,Microsoft,https://x.com/search?q=%24MSFT&f=live
+NVDA,NVIDIA,NASDAQ,NASDAQ:NVDA,NVIDIA,https://x.com/search?q=%24NVDA&f=live
+GOOGL,Alphabet,NASDAQ,NASDAQ:GOOGL,Alphabet Google,https://x.com/search?q=%24GOOGL&f=live
+AMZN,Amazon,NASDAQ,NASDAQ:AMZN,Amazon,https://x.com/search?q=%24AMZN&f=live
+TSLA,Tesla,NASDAQ,NASDAQ:TSLA,Tesla,https://x.com/search?q=%24TSLA&f=live
+META,Meta Platforms,NASDAQ,NASDAQ:META,Meta Platforms,https://x.com/search?q=%24META&f=live
