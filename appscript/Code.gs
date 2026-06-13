@@ -27,6 +27,7 @@ var CFG = {
   discoverySheet: '③発掘候補（少額×成長）',
   detailSheet: '②個別ウォッチ',
   suggestSheet: '🔎 新銘柄サジェスト',
+  maNewsSheet: '📰 M&A・再編ニュース',
   sourcesSheet: 'Sources',
   newsDays: 7,           // ニュース件数を数える対象日数
   rankingTopN: 30,       // ①注目ランキングの表示件数
@@ -53,6 +54,19 @@ var CFG = {
       { q: '新規上場 グロース', label: '新規上場' }
     ]
   },
+  // 📰 M&A・再編ニュースの設定（種別と検索クエリ。自由に追加・編集できます）
+  maNews: {
+    days: 7,        // 何日以内の記事を対象にするか
+    maxRows: 120,   // 表示する最大件数
+    categories: [
+      { label: '買収',    q: '買収 上場' },
+      { label: '子会社化', q: '子会社化 OR 完全子会社化 OR 連結子会社' },
+      { label: '分社化',  q: '分社化 OR 会社分割 OR スピンオフ' },
+      { label: '経営統合', q: '経営統合 OR 合併' },
+      { label: 'TOB',     q: 'TOB OR 株式公開買付' },
+      { label: '資本提携', q: '資本業務提携 OR 資本提携' }
+    ]
+  },
   newsHl: 'ja', newsGl: 'JP', newsCeid: 'JP:ja'
 };
 
@@ -77,6 +91,9 @@ function onOpen() {
     .addItem('🔎 新銘柄サジェストを更新', 'suggestNewStocks')
     .addItem('➕ チェックした新銘柄をWatchlistに取り込む', 'importCheckedSuggestions')
     .addSeparator()
+    .addItem('📰 M&A・再編ニュースを更新', 'updateMaNews')
+    .addItem('➕ チェックしたM&A銘柄をWatchlistに取り込む', 'importCheckedMaNews')
+    .addSeparator()
     .addItem('🛠 初期セットアップ（最初の1回）', 'setup')
     .addItem('⏰ 自動更新(1時間ごと)をON', 'installHourlyTrigger')
     .addToUi();
@@ -90,6 +107,7 @@ function setup() {
   setupRanking_(ss);
   setupDiscovery_(ss);
   setupSuggest_(ss);
+  setupMaNews_(ss);
   setupDetail_(ss);
   SpreadsheetApp.getUi().alert(
     'セットアップ完了。\n\n' +
@@ -179,6 +197,25 @@ function setupSuggest_(ss) {
   sh.setColumnWidth(3, 220);
   sh.setColumnWidth(4, 160);
   sh.setColumnWidth(6, 320);
+}
+
+// ---------- 📰 M&A・再編ニュース ----------
+function setupMaNews_(ss) {
+  var sh = ss.getSheetByName(CFG.maNewsSheet) || ss.insertSheet(CFG.maNewsSheet);
+  sh.clear();
+  sh.getRange('A1').setValue('📰 上場企業の M&A・再編ニュース（買収・子会社化・分社化 ほか）')
+    .setFontWeight('bold').setFontSize(14);
+  sh.getRange('A2').setValue(
+    '更新: メニュー「📰 M&A・再編ニュースを更新」。種別ごとにニュースを検索して新しい順に表示します。' +
+    '検索する種別やキーワードは Code.gs の CFG.maNews.categories で編集できます。');
+  var headers = ['日付', '種別', '記事（クリックで開く）', 'ソース', '関連コード', 'Watchに追加'];
+  sh.getRange(4, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
+    .setBackground('#c55a11').setFontColor('white');
+  sh.setFrozenRows(4);
+  sh.setColumnWidth(1, 130);
+  sh.setColumnWidth(2, 90);
+  sh.setColumnWidth(3, 520);
+  sh.setColumnWidth(4, 150);
 }
 
 // ---------- ②個別ウォッチ ----------
@@ -588,6 +625,113 @@ function importCheckedSuggestions() {
   ss.toast(newRows.length + '件をWatchlistに追加しました。市場(C列)は空欄なので、グロース株なら「東証グロース」を入れてください。次に「① 今すぐ全体を更新」を実行。', '➕ 取り込み完了', 8);
 }
 
+/**
+ * 📰 上場企業の M&A・再編ニュース（買収・子会社化・分社化 ほか）を抽出して一覧化。
+ * 種別ごとに Google News RSS を検索し、新しい順に表示。メニューから手動更新。
+ */
+function updateMaNews() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(CFG.maNewsSheet);
+  if (!sh) { setupMaNews_(ss); sh = ss.getSheetByName(CFG.maNewsSheet); }
+  var tz = ss.getSpreadsheetTimeZone() || 'Asia/Tokyo';
+
+  var map = {}; // link -> 記事
+  CFG.maNews.categories.forEach(function (cat) {
+    var q = cat.q + ' when:' + CFG.maNews.days + 'd';
+    fetchNewsItems_(q, 40).forEach(function (it) {
+      var key = it.link || it.title;
+      if (!key) return;
+      if (!map[key]) {
+        var pairs = extractCodeNamePairs_((it.title || '') + ' ' + (it.desc || ''));
+        map[key] = {
+          title: cleanNewsTitle_(it.title), link: it.link,
+          source: it.source || '', date: parseNewsDate_(it.pubDate),
+          labels: {}, code: pairs.length ? pairs[0].code : ''
+        };
+      }
+      map[key].labels[cat.label] = true;
+    });
+    Utilities.sleep(200);
+  });
+
+  var rows = Object.keys(map).map(function (k) {
+    var r = map[k];
+    return {
+      date: r.date, label: Object.keys(r.labels).join(' / '),
+      title: r.title, link: r.link, source: r.source, code: r.code
+    };
+  });
+  rows.sort(function (a, b) { return (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0); });
+  rows = rows.slice(0, CFG.maNews.maxRows);
+
+  // 既存内容をクリア
+  var lastRow = sh.getLastRow();
+  if (lastRow >= 5) {
+    sh.getRange(5, 1, lastRow - 4, 6).clearContent();
+    sh.getRange(5, 6, lastRow - 4, 1).removeCheckboxes();
+  }
+  if (!rows.length) {
+    sh.getRange(5, 1).setValue('該当ニュースが見つかりませんでした（時間をおいて再実行してください）。');
+    return;
+  }
+
+  // 値・チェックボックスをまとめて書き込み
+  var values = rows.map(function (r) {
+    return [r.date ? Utilities.formatDate(r.date, tz, 'yyyy/MM/dd HH:mm') : '',
+            r.label, '', r.source, r.code, false];
+  });
+  sh.getRange(5, 1, values.length, 6).setValues(values);
+  sh.getRange(5, 6, values.length, 1).insertCheckboxes();
+  // 記事タイトルをクリック可能なリンクに（C列）
+  for (var i = 0; i < rows.length; i++) {
+    var title = rows[i].title || '(無題)';
+    var cell = sh.getRange(5 + i, 3);
+    if (rows[i].link) {
+      cell.setRichTextValue(SpreadsheetApp.newRichTextValue().setText(title).setLinkUrl(rows[i].link).build());
+    } else {
+      cell.setValue(title);
+    }
+  }
+  ss.toast(rows.length + '件のM&A・再編ニュースを表示しました。', '📰 M&Aニュース', 5);
+}
+
+/** 📰シートでチェックした行（関連コードあり）をWatchlistに取り込む */
+function importCheckedMaNews() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(CFG.maNewsSheet);
+  var wl = ss.getSheetByName(CFG.watchlistSheet);
+  if (!sh || !wl || sh.getLastRow() < 5) return;
+  var vals = sh.getRange(5, 1, sh.getLastRow() - 4, 6).getValues(); // A..F
+  var newRows = [], rowsToUncheck = [];
+  vals.forEach(function (r, i) {
+    var code = code4_(r[4]); // E 関連コード
+    if (r[5] === true && code) {
+      newRows.push([code, code, '', 'TYO:' + code, code,
+                    'https://x.com/search?q=%24' + code + '&f=live', '', '']);
+      rowsToUncheck.push(i);
+    }
+  });
+  if (!newRows.length) {
+    ss.toast('チェックされた行（関連コードあり）がありません。', '➕ 取り込み', 4);
+    return;
+  }
+  wl.getRange(wl.getLastRow() + 1, 1, newRows.length, 8).setValues(newRows);
+  rowsToUncheck.forEach(function (i) { sh.getRange(5 + i, 6).setValue(false); });
+  ss.toast(newRows.length + '件をWatchlistに追加しました。市場(C列)や名称を整えて「① 今すぐ全体を更新」を実行してください。', '➕ 取り込み完了', 8);
+}
+
+/** Google News の日付文字列をDateに（失敗時null） */
+function parseNewsDate_(s) {
+  if (!s) return null;
+  var d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** Google Newsのタイトル末尾の " - 媒体名" を整える（ソース列が別にあるため軽く整形） */
+function cleanNewsTitle_(t) {
+  return (t || '').toString().replace(/\s+/g, ' ').trim();
+}
+
 /** ②個別ウォッチのニュースだけを更新したいとき（数式の再計算を促す） */
 function refreshDetailNews() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -679,7 +823,9 @@ function fetchNewsItems_(query, max) {
       out.push({
         title: items[i].getChildText('title') || '',
         link: items[i].getChildText('link') || '',
-        desc: items[i].getChildText('description') || ''
+        desc: items[i].getChildText('description') || '',
+        pubDate: items[i].getChildText('pubDate') || '',
+        source: items[i].getChildText('source') || ''
       });
     }
     return out;
