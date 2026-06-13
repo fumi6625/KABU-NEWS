@@ -26,6 +26,7 @@ var CFG = {
   rankingSheet: '①注目ランキング',
   discoverySheet: '③発掘候補（少額×成長）',
   detailSheet: '②個別ウォッチ',
+  suggestSheet: '🔎 新銘柄サジェスト',
   sourcesSheet: 'Sources',
   newsDays: 7,           // ニュース件数を数える対象日数
   rankingTopN: 30,       // ①注目ランキングの表示件数
@@ -40,6 +41,18 @@ var CFG = {
   },
   // ③発掘スコアの重み
   wDisc: { growth: 0.30, ipo: 0.20, attention: 0.25, smallcap: 0.15, volspike: 0.10 },
+  // 🔎 新銘柄サジェストの設定
+  suggest: {
+    maxRows: 40,                  // 提案を最大何件出すか
+    // TDnetでこの語を含む開示を「きっかけあり」として優先表示
+    tdnetNotable: /上方修正|予想.{0,6}修正|増額|株式分割|公開買付|TOB|業務提携|資本提携|新規上場|自己株式取得|ストップ高/,
+    // Google Newsで探すクエリと、その「きっかけ」ラベル
+    newsQueries: [
+      { q: 'ストップ高 東証', label: 'ストップ高' },
+      { q: '上方修正 東証', label: '上方修正' },
+      { q: '新規上場 グロース', label: '新規上場' }
+    ]
+  },
   newsHl: 'ja', newsGl: 'JP', newsCeid: 'JP:ja'
 };
 
@@ -61,6 +74,9 @@ function onOpen() {
     .addItem('① 今すぐ全体を更新', 'updateAll')
     .addItem('② 個別ウォッチのニュースを更新', 'refreshDetailNews')
     .addSeparator()
+    .addItem('🔎 新銘柄サジェストを更新', 'suggestNewStocks')
+    .addItem('➕ チェックした新銘柄をWatchlistに取り込む', 'importCheckedSuggestions')
+    .addSeparator()
     .addItem('🛠 初期セットアップ（最初の1回）', 'setup')
     .addItem('⏰ 自動更新(1時間ごと)をON', 'installHourlyTrigger')
     .addToUi();
@@ -73,6 +89,7 @@ function setup() {
   setupSources_(ss);
   setupRanking_(ss);
   setupDiscovery_(ss);
+  setupSuggest_(ss);
   setupDetail_(ss);
   SpreadsheetApp.getUi().alert(
     'セットアップ完了。\n\n' +
@@ -143,6 +160,25 @@ function setupDiscovery_(ss) {
   sh.getRange(5, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
     .setBackground('#548235').setFontColor('white');
   sh.setFrozenRows(5);
+}
+
+// ---------- 🔎 新銘柄サジェスト ----------
+function setupSuggest_(ss) {
+  var sh = ss.getSheetByName(CFG.suggestSheet) || ss.insertSheet(CFG.suggestSheet);
+  sh.clear();
+  sh.getRange('A1').setValue('🔎 新銘柄サジェスト（まだWatchlistに無い注目の新顔）').setFontWeight('bold').setFontSize(14);
+  sh.getRange('A2').setValue(
+    '更新: メニュー「🔎 新銘柄サジェストを更新」。TDnetの当日開示（上方修正など）とニュース（ストップ高/上方修正/新規上場）から、' +
+    'まだ監視していないコードを自動で拾います。');
+  sh.getRange('A3').setValue(
+    '使い方: 取り込みたい行の「取込」列にチェック → メニュー「➕ チェックした新銘柄をWatchlistに取り込む」。');
+  var headers = ['取込', 'Code', 'Name', 'きっかけ', 'ソース', '詳細リンク'];
+  sh.getRange(5, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
+    .setBackground('#7030a0').setFontColor('white');
+  sh.setFrozenRows(5);
+  sh.setColumnWidth(3, 220);
+  sh.setColumnWidth(4, 160);
+  sh.setColumnWidth(6, 320);
 }
 
 // ---------- ②個別ウォッチ ----------
@@ -441,6 +477,117 @@ function buildDiscovery_(ss) {
   sh.getRange(6, 6, out.length, 3).setNumberFormat('#,##0');
 }
 
+/**
+ * 🔎 新銘柄サジェスト：TDnet当日開示＋ニュースから、まだWatchlistに無いコードを拾って提案。
+ * メニューから手動で実行（外部取得が多いので自動トリガーには入れていない）。
+ */
+function suggestNewStocks() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(CFG.suggestSheet);
+  if (!sh) { setupSuggest_(ss); sh = ss.getSheetByName(CFG.suggestSheet); }
+
+  // 既存のWatchlistコード（除外用）
+  var wl = ss.getSheetByName(CFG.watchlistSheet);
+  var existing = {};
+  if (wl && wl.getLastRow() > 1) {
+    wl.getRange(2, COL.Code, wl.getLastRow() - 1, 1).getValues().forEach(function (r) {
+      var c = code4_(r[0]); if (c) existing[c] = true;
+    });
+  }
+
+  var found = {}; // code4 -> { name, reasons:{}, sources:{}, link }
+  function add(code, name, reason, source, link) {
+    var c = code4_(code);
+    if (!c || existing[c]) return;
+    if (!found[c]) found[c] = { name: name || '', reasons: {}, sources: {}, link: link || '' };
+    if (name && !found[c].name) found[c].name = name;
+    if (reason) found[c].reasons[reason] = true;
+    if (source) found[c].sources[source] = true;
+    if (link && !found[c].link) found[c].link = link;
+  }
+
+  // 1) TDnet 当日開示（コード・社名つき）
+  var disc = fetchTodayDisclosuresFull_();
+  disc.forEach(function (d) {
+    var notable = CFG.suggest.tdnetNotable.test(d.title || '');
+    var reason = notable ? ('開示: ' + shortTitle_(d.title)) : '適時開示';
+    // 高シグナルの開示を優先。ノイズを減らすため、notableのみ採用。
+    if (notable) add(d.code, d.name, reason, 'TDnet', d.url);
+  });
+
+  // 2) ニュース（コードは <1234> 形式のみ抽出して誤検出を防ぐ）
+  CFG.suggest.newsQueries.forEach(function (nq) {
+    var items = fetchNewsItems_(nq.q, 30);
+    items.forEach(function (it) {
+      var text = (it.title || '') + ' ' + (it.desc || '');
+      extractCodeNamePairs_(text).forEach(function (p) {
+        add(p.code, p.name, nq.label, 'ニュース', it.link);
+      });
+    });
+    Utilities.sleep(200);
+  });
+
+  // 出力（TDnet開示きっかけを上に）
+  var rows = Object.keys(found).map(function (c) {
+    var f = found[c];
+    return {
+      code: c, name: f.name,
+      reason: Object.keys(f.reasons).join(' / '),
+      source: Object.keys(f.sources).join(' / '),
+      link: f.link,
+      pri: f.sources['TDnet'] ? 0 : 1
+    };
+  });
+  rows.sort(function (a, b) { return a.pri - b.pri; });
+  rows = rows.slice(0, CFG.suggest.maxRows);
+
+  sh.getRange(6, 1, Math.max(sh.getLastRow() - 5, 1), 6).clearContent();
+  sh.getRange(6, 1, Math.max(sh.getLastRow() - 5, 1), 1).removeCheckboxes();
+  if (!rows.length) {
+    sh.getRange(6, 2).setValue('新しい候補は見つかりませんでした（時間をおいて再実行してください）。');
+    return;
+  }
+  var out = rows.map(function (r) { return [false, r.code, r.name, r.reason, r.source, r.link]; });
+  sh.getRange(6, 1, out.length, 6).setValues(out);
+  sh.getRange(6, 1, out.length, 1).insertCheckboxes();
+  // 詳細リンクをハイパーリンク化
+  for (var i = 0; i < out.length; i++) {
+    if (out[i][5]) sh.getRange(6 + i, 6).setFormula('=HYPERLINK("' + out[i][5] + '","開く")');
+  }
+  SpreadsheetApp.getActiveSpreadsheet().toast(out.length + '件の新銘柄候補を表示しました。', '🔎 サジェスト', 5);
+}
+
+/** チェックされた提案行をWatchlistに取り込む */
+function importCheckedSuggestions() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(CFG.suggestSheet);
+  var wl = ss.getSheetByName(CFG.watchlistSheet);
+  if (!sh || !wl) return;
+  var last = sh.getLastRow();
+  if (last < 6) return;
+  var vals = sh.getRange(6, 1, last - 5, 3).getValues(); // 取込, Code, Name
+
+  var newRows = [], importedRowIdx = [];
+  vals.forEach(function (r, i) {
+    if (r[0] === true && r[1]) {
+      var code = code4_(r[1]);
+      var name = r[2] || code;
+      newRows.push([code, name, '', 'TYO:' + code, name,
+                    'https://x.com/search?q=%24' + code + '&f=live', '', '']); // A..H
+      importedRowIdx.push(i);
+    }
+  });
+  if (!newRows.length) {
+    ss.toast('チェックされた行がありません。', '➕ 取り込み', 4);
+    return;
+  }
+  var start = wl.getLastRow() + 1;
+  wl.getRange(start, 1, newRows.length, 8).setValues(newRows);
+  // 取り込んだ行のチェックを外す
+  importedRowIdx.forEach(function (i) { sh.getRange(6 + i, 1).setValue(false); });
+  ss.toast(newRows.length + '件をWatchlistに追加しました。市場(C列)は空欄なので、グロース株なら「東証グロース」を入れてください。次に「① 今すぐ全体を更新」を実行。', '➕ 取り込み完了', 8);
+}
+
 /** ②個別ウォッチのニュースだけを更新したいとき（数式の再計算を促す） */
 function refreshDetailNews() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -477,6 +624,84 @@ function fetchNewsCount_(keyword) {
   } catch (err) {
     return 0;
   }
+}
+
+/** 証券コードを4桁(または4文字)に正規化。TDnetの5桁(末尾0)は先頭4文字にする */
+function code4_(v) {
+  if (v == null) return '';
+  var s = v.toString().trim().toUpperCase();
+  var m = s.match(/[0-9][0-9A-Z]{3}[0-9A-Z]?/); // 4〜5文字の英数コード
+  if (!m) return '';
+  var c = m[0];
+  if (c.length === 5) c = c.substring(0, 4); // 5桁は先頭4文字（TDnet形式）
+  return c;
+}
+
+/** 開示タイトルを短く（一覧表示用） */
+function shortTitle_(t) {
+  t = (t || '').toString().replace(/\s+/g, ' ').trim();
+  return t.length > 28 ? t.substring(0, 28) + '…' : t;
+}
+
+/** TDnet当日開示を コード・社名・タイトル・URL つきで取得 */
+function fetchTodayDisclosuresFull_() {
+  try {
+    var url = 'https://webapi.yanoshin.jp/webapi/tdnet/list/today.json?limit=1000';
+    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) return [];
+    var items = (JSON.parse(res.getContentText()).items) || [];
+    return items.map(function (it) {
+      var t = it.Tdnet || it.tdnet || {};
+      return {
+        code: (t.company_code || t.companyCode || '').toString(),
+        name: (t.company_name || t.companyName || '').toString(),
+        title: (t.title || '').toString(),
+        url: (t.document_url || t.url || '').toString()
+      };
+    }).filter(function (d) { return d.code; });
+  } catch (err) {
+    return [];
+  }
+}
+
+/** Google News RSS の記事（title/link/desc）を取得 */
+function fetchNewsItems_(query, max) {
+  try {
+    var url = 'https://news.google.com/rss/search?q=' + encodeURIComponent(query) +
+              '%20when:3d&hl=' + CFG.newsHl + '&gl=' + CFG.newsGl + '&ceid=' + CFG.newsCeid;
+    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+    if (res.getResponseCode() !== 200) return [];
+    var channel = XmlService.parse(res.getContentText()).getRootElement().getChild('channel');
+    if (!channel) return [];
+    var items = channel.getChildren('item');
+    var out = [];
+    for (var i = 0; i < items.length && i < (max || 30); i++) {
+      out.push({
+        title: items[i].getChildText('title') || '',
+        link: items[i].getChildText('link') || '',
+        desc: items[i].getChildText('description') || ''
+      });
+    }
+    return out;
+  } catch (err) {
+    return [];
+  }
+}
+
+/** テキストから <1234> 形式の証券コードと直前の社名を抽出（誤検出を抑制） */
+function extractCodeNamePairs_(text) {
+  var pairs = [], seen = {};
+  // 全角/半角の山かっこ・かぎかっこ内の4文字コード（例: ＜7203＞ <7203> ［7203］）
+  var re = /([^\s　<＜\[［(（]{0,16}?)\s*[<＜\[［]([0-9][0-9A-Za-z]{3})[>＞\]］]/g;
+  var m;
+  while ((m = re.exec(text)) !== null) {
+    var code = code4_(m[2]);
+    if (!code || seen[code]) continue;
+    seen[code] = true;
+    var name = (m[1] || '').replace(/[（）()【】「」、。:：]/g, '').trim();
+    pairs.push({ code: code, name: name });
+  }
+  return pairs;
 }
 
 /** TDnet（当日開示）の会社名一覧を取得 */
