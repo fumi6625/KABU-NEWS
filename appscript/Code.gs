@@ -5,30 +5,54 @@
  * 使い方は appscript/手順書.md を参照してください。
  *
  * 構成シート:
- *   Watchlist      … 監視銘柄リスト（楽天証券で買える銘柄。自由に行追加可）
- *   ①注目ランキング … 今注目の銘柄をスコア順に表示（Stage 1）
- *   ②個別ウォッチ   … 1社を選んで情報を集中表示（Stage 2）
- *   Sources        … 取り込むニュースRSSの一覧
+ *   Watchlist            … 監視銘柄リスト（楽天証券で買える銘柄。自由に行追加可）
+ *   ①注目ランキング       … 今注目の銘柄をスコア順に表示（Stage 1）
+ *   ③発掘候補（少額×成長） … 予算内で買える小型・成長・IPO銘柄を発掘（Stage 1.5）
+ *   ②個別ウォッチ         … 1社を選んで情報を集中表示（Stage 2）
+ *   Sources              … 取り込むニュースRSSの一覧
  *
  * 無料・合法の範囲で動かすための方針:
  *   - 株価/出来高/騰落率 … GOOGLEFINANCE（Googleの公式データ・約20分遅延）
  *   - ニュース           … Google News RSS（IMPORTFEED / UrlFetchApp）
  *   - 適時開示           … TDnet（Yanoshin 公開API）
  *   - Yahoo!ファイナンス・株探の画面スクレイピングは規約違反のため行いません。
+ *   - 増収増益などの財務成長データは無料では自動取得できないため、IPOの新しさ・
+ *     開示/ニュース頻度・株価/出来高モメンタム・手入力メモで「成長らしさ」を近似します。
  */
 
 // ===== 設定（必要なら数値だけ調整してください）=====
 var CFG = {
   watchlistSheet: 'Watchlist',
   rankingSheet: '①注目ランキング',
+  discoverySheet: '③発掘候補（少額×成長）',
   detailSheet: '②個別ウォッチ',
   sourcesSheet: 'Sources',
   newsDays: 7,           // ニュース件数を数える対象日数
-  rankingTopN: 30,       // ランキング上位の表示件数
-  // 合成スコアの重み（合計が1でなくてOK。相対比較に使います）
+  rankingTopN: 30,       // ①注目ランキングの表示件数
+  // ①注目スコアの重み（合計が1でなくてOK。相対比較に使います）
   weight: { change: 0.35, volume: 0.20, news: 0.30, disclosure: 0.15 },
+  // ③発掘の設定（ここを変えるだけで予算などを調整できます）
+  discovery: {
+    budgetYen: 50000,    // 1銘柄あたりの予算（円）。この金額で買える銘柄だけを発掘
+    unitShares: 100,     // 日本株の売買単位（通常100株）
+    ipoRecentDays: 365,  // 上場から何日以内を「IPO（新規上場）」とみなすか
+    topN: 30             // 発掘候補の表示件数
+  },
+  // ③発掘スコアの重み
+  wDisc: { growth: 0.30, ipo: 0.20, attention: 0.25, smallcap: 0.15, volspike: 0.10 },
   newsHl: 'ja', newsGl: 'JP', newsCeid: 'JP:ja'
 };
+
+// Watchlist の列番号（1始まり）。レイアウト変更時はここだけ直せばよい。
+var COL = {
+  Code: 1, Name: 2, Market: 3, Symbol: 4, NewsKeyword: 5, XSearchURL: 6,
+  ListingDate: 7, KabuMini: 8,                       // ← 入力列（任意）
+  Price: 9, ChangePct: 10, Volume: 11, AvgVol20: 12, // ← 以下は自動計算
+  NewsCount: 13, Disclosure: 14, VolSpike: 15,
+  Unit100Yen: 16, Share1Yen: 17, MinBuyYen: 18,
+  AttentionScore: 19, DiscoveryScore: 20, GrowthMemo: 21, UpdatedAt: 22
+};
+var WL_WIDTH = 22;
 
 // スプレッドシートを開いたときにメニューを追加
 function onOpen() {
@@ -48,22 +72,30 @@ function setup() {
   setupWatchlist_(ss);
   setupSources_(ss);
   setupRanking_(ss);
+  setupDiscovery_(ss);
   setupDetail_(ss);
   SpreadsheetApp.getUi().alert(
     'セットアップ完了。\n\n' +
-    '1) 「Watchlist」シートに銘柄を貼り付けてください（watchlist_seed.csv の中身）。\n' +
+    '1) 「Watchlist」シートに銘柄を貼り付けてください。\n' +
+    '   ・大手も見たい → watchlist_seed.csv\n' +
+    '   ・少額×成長を発掘 → growth_smallcap_seed.csv\n' +
+    '   （両方つなげて貼ってOK）\n' +
     '2) メニュー「📈 株ウォッチ → ① 今すぐ全体を更新」を実行。\n' +
-    '3) 「⏰ 自動更新(1時間ごと)をON」で自動化できます。');
+    '3) 「③発掘候補」シートに予算5万円内で買える小型・成長株が出ます。\n' +
+    '4) 「⏰ 自動更新(1時間ごと)をON」で自動化できます。');
 }
 
 // ---------- Watchlist ----------
 function setupWatchlist_(ss) {
   var sh = ss.getSheetByName(CFG.watchlistSheet) || ss.insertSheet(CFG.watchlistSheet);
   var headers = ['Code', 'Name', 'Market', 'Symbol', 'NewsKeyword', 'XSearchURL',
-                 'Price', 'ChangePct', 'Volume', 'NewsCount', 'Disclosure', 'Score', 'UpdatedAt'];
+                 'ListingDate', 'KabuMini',
+                 'Price', 'ChangePct', 'Volume', 'AvgVol20', 'NewsCount', 'Disclosure',
+                 'VolSpike', 'Unit100Yen', 'Share1Yen', 'MinBuyYen',
+                 'AttentionScore', 'DiscoveryScore', 'GrowthMemo(1-5手入力)', 'UpdatedAt'];
   sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
   sh.setFrozenRows(1);
-  sh.getRange('A1:M1').setBackground('#1f3864').setFontColor('white');
+  sh.getRange(1, 1, 1, headers.length).setBackground('#1f3864').setFontColor('white');
 }
 
 // ---------- Sources（取り込みRSS）----------
@@ -96,6 +128,23 @@ function setupRanking_(ss) {
   sh.setFrozenRows(4);
 }
 
+// ---------- ③発掘候補（少額×成長）----------
+function setupDiscovery_(ss) {
+  var sh = ss.getSheetByName(CFG.discoverySheet) || ss.insertSheet(CFG.discoverySheet);
+  sh.clear();
+  sh.getRange('A1').setValue('③ 少額で買える 小型・成長・IPO 発掘候補').setFontWeight('bold').setFontSize(14);
+  sh.getRange('A2').setValue(
+    '予算 ' + CFG.discovery.budgetYen.toLocaleString() + '円以内で買える銘柄だけを、' +
+    '小型・IPO新しさ・話題性・出来高急増・成長メモで採点。予算はコードの CFG.discovery.budgetYen で変更可。');
+  sh.getRange('A3').setValue(
+    '※「高成長(増収増益)」は無料では自動取得できないため近似値です。最終確認は四季報オンライン無料部分・決算短信(TDnet)・各社IRで。');
+  var headers = ['順位', 'Code', 'Name', '市場', '発掘スコア', '株価', '1単元(100株)額', '1株額',
+                 '予算内の買い方', 'IPO', '出来高急増', 'ニュース', '個別を見る', 'X検索'];
+  sh.getRange(5, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
+    .setBackground('#548235').setFontColor('white');
+  sh.setFrozenRows(5);
+}
+
 // ---------- ②個別ウォッチ ----------
 function setupDetail_(ss) {
   var sh = ss.getSheetByName(CFG.detailSheet) || ss.insertSheet(CFG.detailSheet);
@@ -104,58 +153,60 @@ function setupDetail_(ss) {
   sh.getRange('A3').setValue('銘柄コードを選択 →').setFontWeight('bold');
 
   // B3 にウォッチリストの Code から選べるプルダウンを設定
-  var wl = "='" + CFG.watchlistSheet + "'!A2:A";
   var rule = SpreadsheetApp.newDataValidation()
-    .requireValueInRange(SpreadsheetApp.getActiveSpreadsheet()
-      .getSheetByName(CFG.watchlistSheet).getRange('A2:A'), true)
+    .requireValueInRange(ss.getSheetByName(CFG.watchlistSheet).getRange('A2:A'), true)
     .setAllowInvalid(true).build();
   sh.getRange('B3').setDataValidation(rule);
 
   var WL = CFG.watchlistSheet;
-  // 基本情報（Watchlist から VLOOKUP ＋ GOOGLEFINANCE）
+  // 基本情報（Watchlist から VLOOKUP ＋ GOOGLEFINANCE）。B6 = シンボル。
   var rows = [
-    ['会社名',   "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:F,2,FALSE),\"—\")"],
-    ['市場',     "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:F,3,FALSE),\"—\")"],
-    ['シンボル', "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:F,4,FALSE),\"—\")"],
-    ['現在値',   "=IFERROR(GOOGLEFINANCE(B6),\"—\")"],   // B6 = シンボル
+    ['会社名',   "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,2,FALSE),\"—\")"],
+    ['市場',     "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,3,FALSE),\"—\")"],
+    ['シンボル', "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,4,FALSE),\"—\")"],
+    ['現在値',   "=IFERROR(GOOGLEFINANCE(B6),\"—\")"],   // B7
     ['前日比%',  "=IFERROR(GOOGLEFINANCE(B6,\"changepct\"),\"—\")"],
     ['出来高',   "=IFERROR(GOOGLEFINANCE(B6,\"volume\"),\"—\")"],
     ['PER',      "=IFERROR(GOOGLEFINANCE(B6,\"pe\"),\"—\")"],
     ['時価総額', "=IFERROR(GOOGLEFINANCE(B6,\"marketcap\"),\"—\")"],
+    ['1単元(100株)購入額', "=IFERROR(GOOGLEFINANCE(B6)*" + CFG.discovery.unitShares + ",\"—\")"],
+    ['かぶミニ(1株)可', "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,8,FALSE),\"—\")"],
+    ['上場日',   "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,7,FALSE),\"—\")"],
     ['30日チャート', "=IFERROR(SPARKLINE(QUERY(GOOGLEFINANCE(B6,\"price\",TODAY()-30,TODAY()),\"select Col2\"),{\"charttype\",\"line\"}),\"—\")"]
   ];
   sh.getRange(4, 1, rows.length, 2).setValues(rows);
-  sh.getRange('A4:A12').setFontWeight('bold');
+  var lastInfoRow = 3 + rows.length; // = 15
+  sh.getRange(4, 1, rows.length, 1).setFontWeight('bold');
 
-  // Xへの入口
-  sh.getRange('A14').setValue('X検索（クリックで開く）').setFontWeight('bold');
-  sh.getRange('B14').setFormula(
-    "=IFERROR(HYPERLINK(VLOOKUP($B$3,'" + WL + "'!A:F,6,FALSE),\"Xでこの銘柄を検索\"),\"—\")");
-
-  // 公式開示・IR
-  sh.getRange('A15').setValue('適時開示(TDnet)').setFontWeight('bold');
-  sh.getRange('B15').setFormula(
+  // Xへの入口・開示リンク（基本情報の下に配置）
+  var r = lastInfoRow + 2; // 17
+  sh.getRange('A' + r).setValue('X検索（クリックで開く）').setFontWeight('bold');
+  sh.getRange('B' + r).setFormula(
+    "=IFERROR(HYPERLINK(VLOOKUP($B$3,'" + WL + "'!A:H,6,FALSE),\"Xでこの銘柄を検索\"),\"—\")");
+  sh.getRange('A' + (r + 1)).setValue('適時開示(TDnet)').setFontWeight('bold');
+  sh.getRange('B' + (r + 1)).setFormula(
     "=HYPERLINK(\"https://www.release.tdnet.info/inbs/I_main_00.html\",\"TDnet 適時開示閲覧\")");
-  sh.getRange('A16').setValue('EDINET(法定開示)').setFontWeight('bold');
-  sh.getRange('B16').setFormula(
+  sh.getRange('A' + (r + 2)).setValue('EDINET(法定開示)').setFontWeight('bold');
+  sh.getRange('B' + (r + 2)).setFormula(
     "=HYPERLINK(\"https://disclosure.edinet-fsa.go.jp/\",\"EDINETで検索\")");
 
   // ニュース見出し（Google News RSS を会社名で検索して自動表示）
-  sh.getRange('A18').setValue('▼ この企業のニュース（自動取得・新しい順）').setFontWeight('bold').setFontSize(12);
-  var kw = "VLOOKUP($B$3,'" + WL + "'!A:F,5,FALSE)";
+  var nh = r + 4;
+  sh.getRange('A' + nh).setValue('▼ この企業のニュース（自動取得・新しい順）').setFontWeight('bold').setFontSize(12);
+  var kw = "VLOOKUP($B$3,'" + WL + "'!A:H,5,FALSE)";
   var newsUrl = "\"https://news.google.com/rss/search?q=\"&ENCODEURL(" + kw +
                 ")&\"&hl=" + CFG.newsHl + "&gl=" + CFG.newsGl + "&ceid=" + CFG.newsCeid + "\"";
-  sh.getRange('A19').setFormula(
+  sh.getRange('A' + (nh + 1)).setFormula(
     "=IFERROR(IMPORTFEED(" + newsUrl + ",\"items\",TRUE,20),\"（銘柄を選ぶとニュースが表示されます）\")");
 
   sh.getRange('B3').setValue('7203'); // 初期表示
-  sh.setColumnWidth(1, 160);
+  sh.setColumnWidth(1, 170);
   sh.setColumnWidth(2, 520);
 }
 
 /**
- * 全体更新：株価系の数式を入れ、ニュース件数・開示を取得し、スコアを計算して
- * ランキングを並べ替える。メニューまたは1時間トリガーから呼ばれる。
+ * 全体更新：株価系の数式を入れ、ニュース件数・開示を取得し、各スコアを計算して
+ * ①注目ランキングと③発掘候補を並べ替える。メニューまたは1時間トリガーから呼ばれる。
  */
 function updateAll() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -164,97 +215,230 @@ function updateAll() {
   if (last < 2) { SpreadsheetApp.getUi().alert('Watchlist に銘柄を貼り付けてください。'); return; }
   var n = last - 1;
 
-  // 株価系の数式（G:I）を毎回入れ直す（行追加に追従）
-  var symRange = sh.getRange(2, 4, n, 1); // D列 Symbol
-  var priceF = [], chgF = [], volF = [];
+  // 株価系の数式（Price/ChangePct/Volume/AvgVol20）を毎回入れ直す（行追加に追従）
+  var priceF = [], chgF = [], volF = [], avgF = [];
   for (var i = 0; i < n; i++) {
-    var r = i + 2;
-    priceF.push(['=IFERROR(GOOGLEFINANCE(D' + r + '),\"\")']);
-    chgF.push(['=IFERROR(GOOGLEFINANCE(D' + r + ',\"changepct\"),\"\")']);
-    volF.push(['=IFERROR(GOOGLEFINANCE(D' + r + ',\"volume\"),\"\")']);
+    var rr = i + 2;
+    priceF.push(['=IFERROR(GOOGLEFINANCE(D' + rr + '),"")']);
+    chgF.push(['=IFERROR(GOOGLEFINANCE(D' + rr + ',"changepct"),"")']);
+    volF.push(['=IFERROR(GOOGLEFINANCE(D' + rr + ',"volume"),"")']);
+    avgF.push(['=IFERROR(AVERAGE(INDEX(GOOGLEFINANCE(D' + rr + ',"volume",TODAY()-30,TODAY()),0,2)),"")']);
   }
-  sh.getRange(2, 7, n, 1).setFormulas(priceF); // G Price
-  sh.getRange(2, 8, n, 1).setFormulas(chgF);   // H ChangePct
-  sh.getRange(2, 9, n, 1).setFormulas(volF);   // I Volume
+  sh.getRange(2, COL.Price, n, 1).setFormulas(priceF);
+  sh.getRange(2, COL.ChangePct, n, 1).setFormulas(chgF);
+  sh.getRange(2, COL.Volume, n, 1).setFormulas(volF);
+  sh.getRange(2, COL.AvgVol20, n, 1).setFormulas(avgF);
   SpreadsheetApp.flush();
 
-  // データ読み込み
-  var data = sh.getRange(2, 1, n, 11).getValues(); // A..K
-  var todaysDisclosures = fetchTodayDisclosures_(); // 会社名の配列
+  // 全体を読み込み（A..V）
+  var data = sh.getRange(2, 1, n, WL_WIDTH).getValues();
+  var todaysDisclosures = fetchTodayDisclosures_();
+  var budget = CFG.discovery.budgetYen;
+  var today = new Date();
 
-  var newsCounts = [], discFlags = [];
+  // 1行ずつ外部データ取得＋派生値の計算
+  var newsCounts = [], discFlags = [], volSpikes = [], unit100 = [], share1 = [],
+      minBuy = [], smallcap = [], ipoScore = [], momentum = [], memoNorm = [];
   for (var j = 0; j < n; j++) {
-    var keyword = data[j][4] || data[j][1];
+    var row = data[j];
+    var keyword = row[COL.NewsKeyword - 1] || row[COL.Name - 1];
     newsCounts.push(keyword ? fetchNewsCount_(keyword) : 0);
-    var name = (data[j][1] || '').toString();
-    discFlags.push(hasDisclosure_(name, todaysDisclosures) ? 1 : 0);
+    discFlags.push(hasDisclosure_((row[COL.Name - 1] || '').toString(), todaysDisclosures) ? 1 : 0);
+
+    var price = parseFloat(row[COL.Price - 1]) || 0;
+    var vol = parseFloat(row[COL.Volume - 1]) || 0;
+    var avg = parseFloat(row[COL.AvgVol20 - 1]) || 0;
+    var chg = parseFloat(row[COL.ChangePct - 1]) || 0;
+    var u = price * CFG.discovery.unitShares;
+    var s1 = price;
+    var kabu = isKabuMini_(row[COL.KabuMini - 1]);
+
+    volSpikes.push(avg > 0 ? Math.round((vol / avg) * 100) / 100 : '');
+    unit100.push(u || '');
+    share1.push(s1 || '');
+    minBuy.push(minBuyYen_(u, s1, kabu, budget));
+
+    var market = (row[COL.Market - 1] || '').toString();
+    smallcap.push(/グロース|growth/i.test(market) ? 1 : 0);
+    ipoScore.push(ipoScore_(row[COL.ListingDate - 1], today));
+    momentum.push(chg > 0 ? Math.min(chg / 10, 1) : 0);
+    var memo = parseFloat(row[COL.GrowthMemo - 1]);
+    memoNorm.push(isNaN(memo) ? 0 : Math.max(0, Math.min(memo / 5, 1)));
+
     Utilities.sleep(150); // RSSサーバーへの配慮
   }
 
-  // スコア計算（相対ランクで正規化）
-  var chg = data.map(function (r) { return Math.abs(parseFloat(r[7]) || 0); });
-  var vol = data.map(function (r) { return parseFloat(r[8]) || 0; });
-  var scores = [];
-  for (var k = 0; k < n; k++) {
-    var s = CFG.weight.change * pct_(chg, chg[k])
-          + CFG.weight.volume * pct_(vol, vol[k])
-          + CFG.weight.news   * pct_(newsCounts, newsCounts[k])
-          + CFG.weight.disclosure * discFlags[k];
-    scores.push([Math.round(s * 1000) / 10]); // 0-100目安
+  // ① 注目スコア（相対ランクで正規化）
+  var chgAbs = data.map(function (r) { return Math.abs(parseFloat(r[COL.ChangePct - 1]) || 0); });
+  var volArr = data.map(function (r) { return parseFloat(r[COL.Volume - 1]) || 0; });
+  var attention = [];
+  for (var a = 0; a < n; a++) {
+    var sc = CFG.weight.change * pct_(chgAbs, chgAbs[a])
+           + CFG.weight.volume * pct_(volArr, volArr[a])
+           + CFG.weight.news   * pct_(newsCounts, newsCounts[a])
+           + CFG.weight.disclosure * discFlags[a];
+    attention.push(Math.round(sc * 1000) / 10);
   }
 
-  // 書き戻し（J NewsCount, K Disclosure, L Score, M UpdatedAt）
-  sh.getRange(2, 10, n, 1).setValues(newsCounts.map(function (v) { return [v]; }));
-  sh.getRange(2, 11, n, 1).setValues(discFlags.map(function (v) { return [v ? '◯' : '']; }));
-  sh.getRange(2, 12, n, 1).setValues(scores);
-  var now = new Date();
-  sh.getRange(2, 13, n, 1).setValue(now).setNumberFormat('yyyy/MM/dd HH:mm');
+  // ③ 発掘スコア
+  var volSpikeNum = volSpikes.map(function (v) { return parseFloat(v) || 0; });
+  var discovery = [];
+  for (var d = 0; d < n; d++) {
+    var growthProxy = 0.5 * memoNorm[d] + 0.3 * discFlags[d] + 0.2 * momentum[d];
+    var attn = 0.6 * pct_(newsCounts, newsCounts[d]) + 0.4 * pct_(volSpikeNum, volSpikeNum[d]);
+    var volNorm = Math.min(volSpikeNum[d] / 3, 1); // 3倍で満点
+    var score = CFG.wDisc.growth * growthProxy
+              + CFG.wDisc.ipo * ipoScore[d]
+              + CFG.wDisc.attention * attn
+              + CFG.wDisc.smallcap * smallcap[d]
+              + CFG.wDisc.volspike * volNorm;
+    // 予算で買えない銘柄は発掘候補から除外（スコア0）
+    if (!(parseFloat(minBuy[d]) <= budget)) score = 0;
+    discovery.push(Math.round(score * 1000) / 10);
+  }
+
+  // 書き戻し（GrowthMemo=U は手入力なので触らない）
+  writeCol_(sh, COL.NewsCount, newsCounts, n);
+  writeCol_(sh, COL.Disclosure, discFlags.map(function (v) { return v ? '◯' : ''; }), n);
+  writeCol_(sh, COL.VolSpike, volSpikes, n);
+  writeCol_(sh, COL.Unit100Yen, unit100, n);
+  writeCol_(sh, COL.Share1Yen, share1, n);
+  writeCol_(sh, COL.MinBuyYen, minBuy, n);
+  writeCol_(sh, COL.AttentionScore, attention, n);
+  writeCol_(sh, COL.DiscoveryScore, discovery, n);
+  var stamp = []; for (var t = 0; t < n; t++) stamp.push(new Date());
+  sh.getRange(2, COL.UpdatedAt, n, 1).setValues(stamp.map(function (v) { return [v]; }))
+    .setNumberFormat('yyyy/MM/dd HH:mm');
 
   buildRanking_(ss);
+  buildDiscovery_(ss);
+}
+
+/** 1列ぶんの値を書き込むヘルパー */
+function writeCol_(sh, col, arr, n) {
+  sh.getRange(2, col, n, 1).setValues(arr.map(function (v) { return [v]; }));
 }
 
 /** 相対パーセンタイル（0-1）。配列内でvalが上位なら1に近い */
 function pct_(arr, val) {
-  var valid = arr.filter(function (x) { return !isNaN(x); });
+  var valid = arr.map(function (x) { return parseFloat(x); }).filter(function (x) { return !isNaN(x); });
   if (!valid.length) return 0;
   var below = valid.filter(function (x) { return x < val; }).length;
   return below / valid.length;
 }
 
-/** Watchlist のスコアを読み、①注目ランキングに並べ替えて出力 */
+/** かぶミニ可フラグの判定（○ / ◯ / O / yes / 1 / true を可とみなす） */
+function isKabuMini_(v) {
+  var s = (v == null ? '' : v).toString().trim().toLowerCase();
+  return s === '○' || s === '◯' || s === 'o' || s === 'yes' || s === '1' || s === 'true' || s === '可';
+}
+
+/** 予算内で買える最小金額。1単元→無理ならかぶミニ1株→どちらも不可なら単元額を返す */
+function minBuyYen_(unit100, share1, kabu, budget) {
+  if (!unit100 && !share1) return '';
+  if (unit100 && unit100 <= budget) return unit100;
+  if (kabu && share1 && share1 <= budget) return share1;
+  return unit100 || share1; // 予算外（>budget）
+}
+
+/** 上場日から IPO新しさスコア(0-1)。新しいほど1に近い。範囲外/不明は0 */
+function ipoScore_(listingDate, today) {
+  if (!listingDate) return 0;
+  var dt = (listingDate instanceof Date) ? listingDate : new Date(listingDate);
+  if (isNaN(dt.getTime())) return 0;
+  var days = (today - dt) / (1000 * 60 * 60 * 24);
+  if (days < 0 || days > CFG.discovery.ipoRecentDays) return 0;
+  return 1 - (days / CFG.discovery.ipoRecentDays);
+}
+
+/** ①注目ランキングを並べ替えて出力 */
 function buildRanking_(ss) {
   var wl = ss.getSheetByName(CFG.watchlistSheet);
   var last = wl.getLastRow();
   if (last < 2) return;
   var n = last - 1;
-  var d = wl.getRange(2, 1, n, 12).getValues(); // A..L
+  var d = wl.getRange(2, 1, n, WL_WIDTH).getValues();
   var rows = d.map(function (r) {
-    return { code: r[0], name: r[1], xurl: r[5], chg: r[7], vol: r[8],
-             news: r[9], disc: r[10], score: parseFloat(r[11]) || 0 };
+    return { code: r[COL.Code - 1], name: r[COL.Name - 1], xurl: r[COL.XSearchURL - 1],
+             chg: r[COL.ChangePct - 1], vol: r[COL.Volume - 1], news: r[COL.NewsCount - 1],
+             disc: r[COL.Disclosure - 1], score: parseFloat(r[COL.AttentionScore - 1]) || 0 };
   });
   rows.sort(function (a, b) { return b.score - a.score; });
   rows = rows.slice(0, CFG.rankingTopN);
 
   var rk = ss.getSheetByName(CFG.rankingSheet);
   rk.getRange(5, 1, Math.max(rk.getLastRow() - 4, 1), 10).clearContent();
+  var detailGid = ss.getSheetByName(CFG.detailSheet).getSheetId();
   var out = rows.map(function (r, i) {
-    return [i + 1, r.code, r.name, r.score, r.chg, r.vol, r.news, r.disc ? '◯' : '',
-            r.code, r.xurl];
+    return [i + 1, r.code, r.name, r.score, r.chg, r.vol, r.news, r.disc ? '◯' : '', r.code, r.xurl];
   });
-  if (out.length) {
-    rk.getRange(5, 1, out.length, 10).setValues(out);
-    // 「個別を見る」列(I)を②へジャンプするリンクに、X列(J)をリンクにする
-    for (var i = 0; i < out.length; i++) {
-      var row = 5 + i;
-      rk.getRange(row, 9).setFormula(
-        '=HYPERLINK("#gid=' + ss.getSheetByName(CFG.detailSheet).getSheetId() +
-        '","▶ ' + out[i][1] + ' を見る")');
-      if (out[i][9]) {
-        rk.getRange(row, 10).setFormula('=HYPERLINK("' + out[i][9] + '","X検索")');
-      }
-    }
-    rk.getRange(5, 4, out.length, 1).setNumberFormat('0.0');
+  if (!out.length) return;
+  rk.getRange(5, 1, out.length, 10).setValues(out);
+  for (var i = 0; i < out.length; i++) {
+    var row = 5 + i;
+    rk.getRange(row, 9).setFormula('=HYPERLINK("#gid=' + detailGid + '","▶ ' + out[i][1] + ' を見る")');
+    if (out[i][9]) rk.getRange(row, 10).setFormula('=HYPERLINK("' + out[i][9] + '","X検索")');
   }
+  rk.getRange(5, 4, out.length, 1).setNumberFormat('0.0');
+}
+
+/** ③発掘候補：予算内で買える小型・成長・IPO銘柄を並べ替えて出力 */
+function buildDiscovery_(ss) {
+  var wl = ss.getSheetByName(CFG.watchlistSheet);
+  var last = wl.getLastRow();
+  if (last < 2) return;
+  var n = last - 1;
+  var d = wl.getRange(2, 1, n, WL_WIDTH).getValues();
+  var budget = CFG.discovery.budgetYen;
+  var today = new Date();
+
+  var rows = [];
+  for (var i = 0; i < n; i++) {
+    var r = d[i];
+    var minB = parseFloat(r[COL.MinBuyYen - 1]);
+    var score = parseFloat(r[COL.DiscoveryScore - 1]) || 0;
+    var market = (r[COL.Market - 1] || '').toString();
+    var ipo = ipoScore_(r[COL.ListingDate - 1], today) > 0;
+    var isSmall = /グロース|growth/i.test(market);
+    // 予算内 かつ（小型/グロース or IPO新しい）の銘柄だけを対象に
+    if (!(minB <= budget) || !(isSmall || ipo)) continue;
+
+    var price = parseFloat(r[COL.Price - 1]) || 0;
+    var unit = parseFloat(r[COL.Unit100Yen - 1]) || 0;
+    var s1 = parseFloat(r[COL.Share1Yen - 1]) || 0;
+    var kabu = isKabuMini_(r[COL.KabuMini - 1]);
+    var how = (unit && unit <= budget) ? '1単元(100株)'
+            : (kabu && s1 && s1 <= budget) ? '1株(かぶミニ)' : '—';
+    var vs = parseFloat(r[COL.VolSpike - 1]);
+    rows.push({
+      code: r[COL.Code - 1], name: r[COL.Name - 1], market: market, score: score,
+      price: price, unit: unit, share1: s1, how: how,
+      ipo: ipo ? '◯' : '', volspike: isNaN(vs) ? '' : (vs + '倍'),
+      news: r[COL.NewsCount - 1], xurl: r[COL.XSearchURL - 1]
+    });
+  }
+  rows.sort(function (a, b) { return b.score - a.score; });
+  rows = rows.slice(0, CFG.discovery.topN);
+
+  var sh = ss.getSheetByName(CFG.discoverySheet);
+  sh.getRange(6, 1, Math.max(sh.getLastRow() - 5, 1), 14).clearContent();
+  if (!rows.length) {
+    sh.getRange(6, 1).setValue('予算内で条件に合う銘柄がありません。Watchlistにグロース/小型/IPO銘柄を追加するか、CFG.discovery.budgetYen を上げてください。');
+    return;
+  }
+  var detailGid = ss.getSheetByName(CFG.detailSheet).getSheetId();
+  var out = rows.map(function (r, i) {
+    return [i + 1, r.code, r.name, r.market, r.score, r.price, r.unit, r.share1,
+            r.how, r.ipo, r.volspike, r.news, r.code, r.xurl];
+  });
+  sh.getRange(6, 1, out.length, 14).setValues(out);
+  for (var k = 0; k < out.length; k++) {
+    var row = 6 + k;
+    sh.getRange(row, 13).setFormula('=HYPERLINK("#gid=' + detailGid + '","▶ ' + out[k][1] + ' を見る")');
+    if (out[k][13]) sh.getRange(row, 14).setFormula('=HYPERLINK("' + out[k][13] + '","X検索")');
+  }
+  sh.getRange(6, 5, out.length, 1).setNumberFormat('0.0');
+  sh.getRange(6, 6, out.length, 3).setNumberFormat('#,##0');
 }
 
 /** ②個別ウォッチのニュースだけを更新したいとき（数式の再計算を促す） */
