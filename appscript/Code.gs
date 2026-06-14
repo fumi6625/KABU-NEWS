@@ -77,9 +77,10 @@ var COL = {
   Price: 9, ChangePct: 10, Volume: 11, AvgVol20: 12, // ← 以下は自動計算
   NewsCount: 13, Disclosure: 14, VolSpike: 15,
   Unit100Yen: 16, Share1Yen: 17, MinBuyYen: 18,
-  AttentionScore: 19, DiscoveryScore: 20, GrowthMemo: 21, UpdatedAt: 22
+  AttentionScore: 19, DiscoveryScore: 20, GrowthMemo: 21, UpdatedAt: 22,
+  RakutenBuyable: 23, RakutenURL: 24
 };
-var WL_WIDTH = 22;
+var WL_WIDTH = 24;
 
 // スプレッドシートを開いたときにメニューを追加
 function onOpen() {
@@ -127,7 +128,8 @@ function setupWatchlist_(ss) {
                  'ListingDate', 'KabuMini',
                  'Price', 'ChangePct', 'Volume', 'AvgVol20', 'NewsCount', 'Disclosure',
                  'VolSpike', 'Unit100Yen', 'Share1Yen', 'MinBuyYen',
-                 'AttentionScore', 'DiscoveryScore', 'GrowthMemo(1-5手入力)', 'UpdatedAt'];
+                 'AttentionScore', 'DiscoveryScore', 'GrowthMemo(1-5手入力)', 'UpdatedAt',
+                 'RakutenBuyable', 'RakutenURL'];
   sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
   sh.setFrozenRows(1);
   sh.getRange(1, 1, 1, headers.length).setBackground('#1f3864').setFontColor('white');
@@ -157,7 +159,7 @@ function setupRanking_(ss) {
   sh.clear();
   sh.getRange('A1').setValue('① 今注目されている銘柄（スコア順）').setFontWeight('bold').setFontSize(14);
   sh.getRange('A2').setValue('更新: メニュー「📈 株ウォッチ → 今すぐ全体を更新」／自動更新は1時間ごと');
-  var headers = ['順位', 'Code', 'Name', 'Score', 'ChangePct', 'Volume', 'NewsCount', '開示', '個別を見る', 'X検索'];
+  var headers = ['順位', 'Code', 'Name', 'Score', 'ChangePct', 'Volume', 'NewsCount', '開示', '個別を見る', 'X検索', '楽天'];
   sh.getRange(4, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
     .setBackground('#2e75b6').setFontColor('white');
   sh.setFrozenRows(4);
@@ -174,7 +176,7 @@ function setupDiscovery_(ss) {
   sh.getRange('A3').setValue(
     '※「高成長(増収増益)」は無料では自動取得できないため近似値です。最終確認は四季報オンライン無料部分・決算短信(TDnet)・各社IRで。');
   var headers = ['順位', 'Code', 'Name', '市場', '発掘スコア', '株価', '1単元(100株)額', '1株額',
-                 '予算内の買い方', 'IPO', '出来高急増', 'ニュース', '個別を見る', 'X検索'];
+                 '予算内の買い方', 'IPO', '出来高急増', 'ニュース', '個別を見る', 'X検索', '楽天'];
   sh.getRange(5, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
     .setBackground('#548235').setFontColor('white');
   sh.setFrozenRows(5);
@@ -245,6 +247,8 @@ function setupDetail_(ss) {
     ['1単元(100株)購入額', "=IFERROR(GOOGLEFINANCE(B6)*" + CFG.discovery.unitShares + ",\"—\")"],
     ['かぶミニ(1株)可', "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,8,FALSE),\"—\")"],
     ['上場日',   "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:H,7,FALSE),\"—\")"],
+    ['楽天で買える?', "=IFERROR(VLOOKUP($B$3,'" + WL + "'!A:X,23,FALSE),\"（更新後に表示）\")"],
+    ['楽天証券ページ', "=IFERROR(HYPERLINK(VLOOKUP($B$3,'" + WL + "'!A:X,24,FALSE),\"楽天証券でこの銘柄を見る\"),\"（更新後に表示）\")"],
     ['30日チャート', "=IFERROR(SPARKLINE(QUERY(GOOGLEFINANCE(B6,\"price\",TODAY()-30,TODAY()),\"select Col2\"),{\"charttype\",\"line\"}),\"—\")"]
   ];
   sh.getRange(4, 1, rows.length, 2).setValues(rows);
@@ -311,7 +315,8 @@ function updateAll() {
 
   // 1行ずつ外部データ取得＋派生値の計算
   var newsCounts = [], discFlags = [], volSpikes = [], unit100 = [], share1 = [],
-      minBuy = [], smallcap = [], ipoScore = [], momentum = [], memoNorm = [];
+      minBuy = [], smallcap = [], ipoScore = [], momentum = [], memoNorm = [],
+      buyable = [], rakUrl = [];
   for (var j = 0; j < n; j++) {
     var row = data[j];
     var keyword = row[COL.NewsKeyword - 1] || row[COL.Name - 1];
@@ -337,6 +342,10 @@ function updateAll() {
     momentum.push(chg > 0 ? Math.min(chg / 10, 1) : 0);
     var memo = parseFloat(row[COL.GrowthMemo - 1]);
     memoNorm.push(isNaN(memo) ? 0 : Math.max(0, Math.min(memo / 5, 1)));
+
+    var symbol = row[COL.Symbol - 1];
+    buyable.push(rakutenBuyable_(symbol));
+    rakUrl.push(rakutenUrl_(symbol));
 
     Utilities.sleep(150); // RSSサーバーへの配慮
   }
@@ -379,6 +388,8 @@ function updateAll() {
   writeCol_(sh, COL.MinBuyYen, minBuy, n);
   writeCol_(sh, COL.AttentionScore, attention, n);
   writeCol_(sh, COL.DiscoveryScore, discovery, n);
+  writeCol_(sh, COL.RakutenBuyable, buyable, n);
+  writeCol_(sh, COL.RakutenURL, rakUrl, n);
   var stamp = []; for (var t = 0; t < n; t++) stamp.push(new Date());
   sh.getRange(2, COL.UpdatedAt, n, 1).setValues(stamp.map(function (v) { return [v]; }))
     .setNumberFormat('yyyy/MM/dd HH:mm');
@@ -398,6 +409,28 @@ function pct_(arr, val) {
   if (!valid.length) return 0;
   var below = valid.filter(function (x) { return x < val; }).length;
   return below / valid.length;
+}
+
+/** 楽天証券で買えるかの目安。国内上場株は原則買える／米国株は取扱リスト次第で要確認 */
+function rakutenBuyable_(symbol) {
+  var ex = ((symbol || '').toString().split(':')[0] || '').toUpperCase();
+  if (ex === 'TYO') return '○ 国内現物';
+  if (ex === 'NASDAQ' || ex === 'NYSE' || ex === 'NYSEARCA' || ex === 'AMEX' || ex === 'BATS') return '要確認(米国)';
+  return '要確認';
+}
+
+/** 楽天証券の個別銘柄ページURL（国内 .T／NASDAQ .O／NYSE .N）。作れない場合は空文字 */
+function rakutenUrl_(symbol) {
+  var parts = (symbol || '').toString().trim().split(':');
+  if (parts.length < 2) return '';
+  var ex = parts[0].toUpperCase(), tk = parts[1].toUpperCase();
+  var ric = '';
+  if (ex === 'TYO') ric = code4_(tk) + '.T';
+  else if (ex === 'NASDAQ') ric = tk + '.O';
+  else if (ex === 'NYSE') ric = tk + '.N';
+  else if (ex === 'NYSEARCA' || ex === 'AMEX' || ex === 'BATS') ric = tk + '.P';
+  if (!ric) return '';
+  return 'https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric=' + ric;
 }
 
 /** かぶミニ可フラグの判定（○ / ◯ / O / yes / 1 / true を可とみなす） */
@@ -434,23 +467,25 @@ function buildRanking_(ss) {
   var rows = d.map(function (r) {
     return { code: r[COL.Code - 1], name: r[COL.Name - 1], xurl: r[COL.XSearchURL - 1],
              chg: r[COL.ChangePct - 1], vol: r[COL.Volume - 1], news: r[COL.NewsCount - 1],
-             disc: r[COL.Disclosure - 1], score: parseFloat(r[COL.AttentionScore - 1]) || 0 };
+             disc: r[COL.Disclosure - 1], score: parseFloat(r[COL.AttentionScore - 1]) || 0,
+             rak: r[COL.RakutenURL - 1] };
   });
   rows.sort(function (a, b) { return b.score - a.score; });
   rows = rows.slice(0, CFG.rankingTopN);
 
   var rk = ss.getSheetByName(CFG.rankingSheet);
-  rk.getRange(5, 1, Math.max(rk.getLastRow() - 4, 1), 10).clearContent();
+  rk.getRange(5, 1, Math.max(rk.getLastRow() - 4, 1), 11).clearContent();
   var detailGid = ss.getSheetByName(CFG.detailSheet).getSheetId();
   var out = rows.map(function (r, i) {
-    return [i + 1, r.code, r.name, r.score, r.chg, r.vol, r.news, r.disc ? '◯' : '', r.code, r.xurl];
+    return [i + 1, r.code, r.name, r.score, r.chg, r.vol, r.news, r.disc ? '◯' : '', r.code, r.xurl, r.rak];
   });
   if (!out.length) return;
-  rk.getRange(5, 1, out.length, 10).setValues(out);
+  rk.getRange(5, 1, out.length, 11).setValues(out);
   for (var i = 0; i < out.length; i++) {
     var row = 5 + i;
     rk.getRange(row, 9).setFormula('=HYPERLINK("#gid=' + detailGid + '","▶ ' + out[i][1] + ' を見る")');
     if (out[i][9]) rk.getRange(row, 10).setFormula('=HYPERLINK("' + out[i][9] + '","X検索")');
+    if (out[i][10]) rk.getRange(row, 11).setFormula('=HYPERLINK("' + out[i][10] + '","楽天")');
   }
   rk.getRange(5, 4, out.length, 1).setNumberFormat('0.0');
 }
@@ -487,14 +522,14 @@ function buildDiscovery_(ss) {
       code: r[COL.Code - 1], name: r[COL.Name - 1], market: market, score: score,
       price: price, unit: unit, share1: s1, how: how,
       ipo: ipo ? '◯' : '', volspike: isNaN(vs) ? '' : (vs + '倍'),
-      news: r[COL.NewsCount - 1], xurl: r[COL.XSearchURL - 1]
+      news: r[COL.NewsCount - 1], xurl: r[COL.XSearchURL - 1], rak: r[COL.RakutenURL - 1]
     });
   }
   rows.sort(function (a, b) { return b.score - a.score; });
   rows = rows.slice(0, CFG.discovery.topN);
 
   var sh = ss.getSheetByName(CFG.discoverySheet);
-  sh.getRange(6, 1, Math.max(sh.getLastRow() - 5, 1), 14).clearContent();
+  sh.getRange(6, 1, Math.max(sh.getLastRow() - 5, 1), 15).clearContent();
   if (!rows.length) {
     sh.getRange(6, 1).setValue('予算内で条件に合う銘柄がありません。Watchlistにグロース/小型/IPO銘柄を追加するか、CFG.discovery.budgetYen を上げてください。');
     return;
@@ -502,13 +537,14 @@ function buildDiscovery_(ss) {
   var detailGid = ss.getSheetByName(CFG.detailSheet).getSheetId();
   var out = rows.map(function (r, i) {
     return [i + 1, r.code, r.name, r.market, r.score, r.price, r.unit, r.share1,
-            r.how, r.ipo, r.volspike, r.news, r.code, r.xurl];
+            r.how, r.ipo, r.volspike, r.news, r.code, r.xurl, r.rak];
   });
-  sh.getRange(6, 1, out.length, 14).setValues(out);
+  sh.getRange(6, 1, out.length, 15).setValues(out);
   for (var k = 0; k < out.length; k++) {
     var row = 6 + k;
     sh.getRange(row, 13).setFormula('=HYPERLINK("#gid=' + detailGid + '","▶ ' + out[k][1] + ' を見る")');
     if (out[k][13]) sh.getRange(row, 14).setFormula('=HYPERLINK("' + out[k][13] + '","X検索")');
+    if (out[k][14]) sh.getRange(row, 15).setFormula('=HYPERLINK("' + out[k][14] + '","楽天")');
   }
   sh.getRange(6, 5, out.length, 1).setNumberFormat('0.0');
   sh.getRange(6, 6, out.length, 3).setNumberFormat('#,##0');
