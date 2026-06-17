@@ -28,6 +28,7 @@ var CFG = {
   detailSheet: '②個別ウォッチ',
   suggestSheet: '🔎 新銘柄サジェスト',
   maNewsSheet: '📰 M&A・再編ニュース',
+  controlSheet: '⚙️ 操作',
   sourcesSheet: 'Sources',
   newsDays: 7,           // ニュース件数を数える対象日数
   rankingTopN: 30,       // ①注目ランキングの表示件数
@@ -96,6 +97,7 @@ function onOpen() {
     .addItem('➕ チェックしたM&A銘柄をWatchlistに取り込む', 'importCheckedMaNews')
     .addSeparator()
     .addItem('🛠 初期セットアップ（最初の1回）', 'setup')
+    .addItem('📱 シート内ボタンを有効化（スマホ対応）', 'installControls')
     .addItem('⏰ 自動更新(1時間ごと)をON', 'installHourlyTrigger')
     .addToUi();
 }
@@ -109,7 +111,9 @@ function setup() {
   setupDiscovery_(ss);
   setupSuggest_(ss);
   setupMaNews_(ss);
+  setupControls_(ss);
   setupDetail_(ss);
+  installControls_();
   SpreadsheetApp.getUi().alert(
     'セットアップ完了。\n\n' +
     '1) 「Watchlist」シートに銘柄を貼り付けてください。\n' +
@@ -118,7 +122,8 @@ function setup() {
     '   （両方つなげて貼ってOK）\n' +
     '2) メニュー「📈 株ウォッチ → ① 今すぐ全体を更新」を実行。\n' +
     '3) 「③発掘候補」シートに予算5万円内で買える小型・成長株が出ます。\n' +
-    '4) 「⏰ 自動更新(1時間ごと)をON」で自動化できます。');
+    '4) スマホでは「⚙️ 操作」シートのチェックボックスで更新できます。\n' +
+    '5) 「⏰ 自動更新(1時間ごと)をON」で自動化できます。');
 }
 
 // ---------- Watchlist ----------
@@ -220,6 +225,40 @@ function setupMaNews_(ss) {
   sh.setColumnWidth(4, 150);
 }
 
+// ---------- ⚙️ 操作（スマホ対応の更新ボタン）----------
+// チェックを入れると下の onSheetEdit トリガーが実行し、終わると自動でOFFに戻ります。
+var CONTROL_ACTIONS = [
+  { row: 4, label: '① 全体を更新（株価・ニュース・スコア）', fn: 'updateAll' },
+  { row: 5, label: '🔎 新銘柄サジェストを更新', fn: 'suggestNewStocks' },
+  { row: 6, label: '📰 M&A・再編ニュースを更新', fn: 'updateMaNews' },
+  { row: 7, label: '② 個別ウォッチのニュースを更新', fn: 'refreshDetailNews' }
+];
+
+function setupControls_(ss) {
+  var sh = ss.getSheetByName(CFG.controlSheet) || ss.insertSheet(CFG.controlSheet);
+  sh.clear();
+  sh.getRange('A1').setValue('⚙️ 操作（スマホ対応）').setFontWeight('bold').setFontSize(14);
+  sh.getRange('A2').setValue(
+    'B列のチェックボックスをONにすると、その操作を実行します（数十秒）。終わると自動でOFFに戻ります。' +
+    'パソコンの「📈 株ウォッチ」メニューと同じ操作が、スマホのスプレッドシートアプリからもできます。');
+  CONTROL_ACTIONS.forEach(function (a) {
+    sh.getRange(a.row, 1).setValue(a.label).setFontWeight('bold');
+    sh.getRange(a.row, 2).insertCheckboxes().setValue(false);
+  });
+  sh.getRange(9, 1).setValue('最終実行ログ →');
+  sh.getRange(9, 2).setValue('（まだありません）');
+  sh.setColumnWidth(1, 320);
+  sh.setColumnWidth(2, 240);
+}
+
+/** 操作シートのチェックボックス→関数のマップ（行番号→fn） */
+function controlFnByRow_(row) {
+  for (var i = 0; i < CONTROL_ACTIONS.length; i++) {
+    if (CONTROL_ACTIONS[i].row === row) return CONTROL_ACTIONS[i].fn;
+  }
+  return null;
+}
+
 // ---------- ②個別ウォッチ ----------
 function setupDetail_(ss) {
   var sh = ss.getSheetByName(CFG.detailSheet) || ss.insertSheet(CFG.detailSheet);
@@ -289,7 +328,7 @@ function updateAll() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName(CFG.watchlistSheet);
   var last = sh.getLastRow();
-  if (last < 2) { SpreadsheetApp.getUi().alert('Watchlist に銘柄を貼り付けてください。'); return; }
+  if (last < 2) { ss.toast('Watchlist に銘柄を貼り付けてください。', '⚠️', 5); return; }
   var n = last - 1;
 
   // 株価系の数式（Price/ChangePct/Volume/AvgVol20）を毎回入れ直す（行追加に追従）
@@ -785,6 +824,65 @@ function onEdit(e) {
   if (sh.getName() === CFG.detailSheet && e.range.getA1Notation() === 'B3') {
     // IMPORTFEED は B3 参照なので自動再計算される。ここでは特別な処理は不要。
   }
+}
+
+/**
+ * インストール型 onEdit トリガー。「⚙️ 操作」シートのチェックボックスON→対応する更新を実行。
+ * スマホのスプレッドシートアプリからの編集でも発火するため、メニューが使えない環境で使う。
+ */
+function onSheetEdit(e) {
+  if (!e || !e.range) return;
+  var sh = e.range.getSheet();
+  if (sh.getName() !== CFG.controlSheet) return;
+  if (e.range.getColumn() !== 2) return;       // B列のチェックボックスのみ
+  var row = e.range.getRow();
+  var fn = controlFnByRow_(row);
+  if (!fn || e.range.getValue() !== true) return;
+
+  var ss = e.source || SpreadsheetApp.getActiveSpreadsheet();
+  var tz = ss.getSpreadsheetTimeZone() || 'Asia/Tokyo';
+  var label = '';
+  for (var i = 0; i < CONTROL_ACTIONS.length; i++) {
+    if (CONTROL_ACTIONS[i].row === row) label = CONTROL_ACTIONS[i].label;
+  }
+  sh.getRange(9, 2).setValue('実行中… ' + label);
+  SpreadsheetApp.flush();
+  try {
+    runControl_(fn);
+    sh.getRange(9, 2).setValue('完了: ' + label + '  ' + Utilities.formatDate(new Date(), tz, 'MM/dd HH:mm'));
+  } catch (err) {
+    sh.getRange(9, 2).setValue('エラー: ' + (err && err.message ? err.message : err));
+  } finally {
+    e.range.setValue(false); // チェックを自動でOFFに戻す
+  }
+}
+
+/** 操作シートのチェックに対応する更新関数を実行 */
+function runControl_(fn) {
+  switch (fn) {
+    case 'updateAll': updateAll(); break;
+    case 'suggestNewStocks': suggestNewStocks(); break;
+    case 'updateMaNews': updateMaNews(); break;
+    case 'refreshDetailNews': refreshDetailNews(); break;
+  }
+}
+
+/** インストール型 onEdit トリガーを設置（重複は削除してから） */
+function installControls_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'onSheetEdit') ScriptApp.deleteTrigger(triggers[i]);
+  }
+  ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(ss).onEdit().create();
+}
+
+/** メニューから「シート内ボタンを有効化」 */
+function installControls() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss.getSheetByName(CFG.controlSheet)) setupControls_(ss);
+  installControls_();
+  SpreadsheetApp.getUi().alert('シート内ボタンを有効化しました。\n「⚙️ 操作」シートのチェックボックスで、スマホからも更新できます。');
 }
 
 // ===== RSS / API ヘルパー =====
